@@ -37,6 +37,7 @@ typedef struct {
     float *bias_grad;   /* out_c, accumulated */
     float *weight_momentum; /* same shape as weights */
     float *bias_momentum;   /* out_c */
+    float *col;             /* im2col scratch, in_c*k*k x out_h*out_w */
     int in_c, in_h, in_w;
     int out_c, out_h, out_w;
     int k, pad, stride;

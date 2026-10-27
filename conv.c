@@ -8,10 +8,173 @@ int conv2d_out_size(int in, int k, int pad, int stride)
     return (in + 2 * pad - k) / stride + 1;
 }
 
+size_t conv2d_col_size(int in_c, int k, int out_h, int out_w)
+{
+    return (size_t)in_c * k * k * out_h * out_w;
+}
+
+void im2col(const float *input, int in_c, int in_h, int in_w,
+            int k, int pad, int stride, int out_h, int out_w, float *col)
+{
+    int out_pixels = out_h * out_w;
+    int row = 0;
+
+    for (int c = 0; c < in_c; c++) {
+        const float *in = input + (size_t)c * in_h * in_w;
+
+        for (int ky = 0; ky < k; ky++) {
+            for (int kx = 0; kx < k; kx++) {
+                float *dst = col + (size_t)row * out_pixels;
+
+                for (int oh = 0; oh < out_h; oh++) {
+                    int ih = oh * stride - pad + ky;
+                    float *dst_row = dst + (size_t)oh * out_w;
+
+                    if (ih < 0 || ih >= in_h) {
+                        memset(dst_row, 0, (size_t)out_w * sizeof(float));
+                        continue;
+                    }
+
+                    const float *in_row = in + (size_t)ih * in_w;
+
+                    for (int ow = 0; ow < out_w; ow++) {
+                        int iw = ow * stride - pad + kx;
+                        dst_row[ow] = (iw >= 0 && iw < in_w) ? in_row[iw] : 0.0f;
+                    }
+                }
+
+                row++;
+            }
+        }
+    }
+}
+
+void col2im(const float *col, int in_c, int in_h, int in_w,
+            int k, int pad, int stride, int out_h, int out_w, float *input_grad)
+{
+    int out_pixels = out_h * out_w;
+    int row = 0;
+
+    for (int c = 0; c < in_c; c++) {
+        float *in = input_grad + (size_t)c * in_h * in_w;
+
+        for (int ky = 0; ky < k; ky++) {
+            for (int kx = 0; kx < k; kx++) {
+                const float *src = col + (size_t)row * out_pixels;
+
+                for (int oh = 0; oh < out_h; oh++) {
+                    int ih = oh * stride - pad + ky;
+                    if (ih < 0 || ih >= in_h)
+                        continue;
+
+                    const float *src_row = src + (size_t)oh * out_w;
+                    float *in_row = in + (size_t)ih * in_w;
+
+                    for (int ow = 0; ow < out_w; ow++) {
+                        int iw = ow * stride - pad + kx;
+                        if (iw < 0 || iw >= in_w)
+                            continue;
+                        in_row[iw] += src_row[ow];
+                    }
+                }
+
+                row++;
+            }
+        }
+    }
+}
+
 void conv2d_forward(const float *input, int in_c, int in_h, int in_w,
                     const float *weights, const float *biases,
                     int out_c, int k, int pad, int stride,
-                    float *output, int out_h, int out_w)
+                    float *output, int out_h, int out_w, float *col)
+{
+    int rows = in_c * k * k;
+    int out_pixels = out_h * out_w;
+
+    im2col(input, in_c, in_h, in_w, k, pad, stride, out_h, out_w, col);
+
+    for (int oc = 0; oc < out_c; oc++) {
+        const float *weights_oc = weights + (size_t)oc * rows;
+        float *out = output + (size_t)oc * out_pixels;
+        float bias = biases ? biases[oc] : 0.0f;
+
+        for (int p = 0; p < out_pixels; p++)
+            out[p] = bias;
+
+        for (int r = 0; r < rows; r++) {
+            float weight = weights_oc[r];
+            if (weight == 0.0f)
+                continue;
+
+            const float *col_row = col + (size_t)r * out_pixels;
+            for (int p = 0; p < out_pixels; p++)
+                out[p] += weight * col_row[p];
+        }
+    }
+}
+
+void conv2d_backward(const float *input, int in_c, int in_h, int in_w,
+                     const float *weights, int out_c, int k, int pad, int stride,
+                     const float *output_grad, int out_h, int out_w,
+                     float *weight_grad, float *bias_grad, float *input_grad,
+                     float *col)
+{
+    int rows = in_c * k * k;
+    int out_pixels = out_h * out_w;
+
+    im2col(input, in_c, in_h, in_w, k, pad, stride, out_h, out_w, col);
+
+    for (int oc = 0; oc < out_c; oc++) {
+        const float *dout = output_grad + (size_t)oc * out_pixels;
+        float *dw = weight_grad ? weight_grad + (size_t)oc * rows : NULL;
+
+        if (bias_grad) {
+            float sum = 0.0f;
+            for (int p = 0; p < out_pixels; p++)
+                sum += dout[p];
+            bias_grad[oc] += sum;
+        }
+
+        if (!dw)
+            continue;
+
+        for (int r = 0; r < rows; r++) {
+            const float *col_row = col + (size_t)r * out_pixels;
+            float grad = 0.0f;
+
+            for (int p = 0; p < out_pixels; p++)
+                grad += dout[p] * col_row[p];
+
+            dw[r] += grad;
+        }
+    }
+
+    if (!input_grad)
+        return;
+
+    /* Reuse the im2col buffer for dcol = W^T * dout, then scatter it back. */
+    for (int r = 0; r < rows; r++) {
+        float *dst = col + (size_t)r * out_pixels;
+        memset(dst, 0, (size_t)out_pixels * sizeof(float));
+
+        for (int oc = 0; oc < out_c; oc++) {
+            float weight = weights[(size_t)oc * rows + r];
+            const float *dout = output_grad + (size_t)oc * out_pixels;
+
+            for (int p = 0; p < out_pixels; p++)
+                dst[p] += weight * dout[p];
+        }
+    }
+
+    memset(input_grad, 0, (size_t)in_c * in_h * in_w * sizeof(float));
+    col2im(col, in_c, in_h, in_w, k, pad, stride, out_h, out_w, input_grad);
+}
+
+void conv2d_direct_forward(const float *input, int in_c, int in_h, int in_w,
+                           const float *weights, const float *biases,
+                           int out_c, int k, int pad, int stride,
+                           float *output, int out_h, int out_w)
 {
     int out_pixels = out_h * out_w;
 
@@ -54,10 +217,10 @@ void conv2d_forward(const float *input, int in_c, int in_h, int in_w,
     }
 }
 
-void conv2d_backward(const float *input, int in_c, int in_h, int in_w,
-                     const float *weights, int out_c, int k, int pad, int stride,
-                     const float *output_grad, int out_h, int out_w,
-                     float *weight_grad, float *bias_grad, float *input_grad)
+void conv2d_direct_backward(const float *input, int in_c, int in_h, int in_w,
+                            const float *weights, int out_c, int k, int pad, int stride,
+                            const float *output_grad, int out_h, int out_w,
+                            float *weight_grad, float *bias_grad, float *input_grad)
 {
     int out_pixels = out_h * out_w;
 

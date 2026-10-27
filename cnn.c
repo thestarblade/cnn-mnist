@@ -33,6 +33,7 @@ static void conv_init(ConvLayer *layer, int in_c, int in_h, int in_w,
     layer->bias_grad = calloc((size_t)out_c, sizeof(float));
     layer->weight_momentum = calloc(count, sizeof(float));
     layer->bias_momentum = calloc((size_t)out_c, sizeof(float));
+    layer->col = malloc(conv2d_col_size(in_c, k, layer->out_h, layer->out_w) * sizeof(float));
 
     float fan_in = (float)(in_c * k * k);
     for (size_t i = 0; i < count; i++)
@@ -47,12 +48,14 @@ static void conv_free(ConvLayer *layer)
     free(layer->bias_grad);
     free(layer->weight_momentum);
     free(layer->bias_momentum);
+    free(layer->col);
     layer->weights = NULL;
     layer->biases = NULL;
     layer->weight_grad = NULL;
     layer->bias_grad = NULL;
     layer->weight_momentum = NULL;
     layer->bias_momentum = NULL;
+    layer->col = NULL;
 }
 
 static void pool_init(PoolLayer *layer, int channels, int in_h, int in_w, int size, int stride)
@@ -154,7 +157,7 @@ void cnn_forward(CNN *net, const float *input)
     conv2d_forward(net->input, 1, MNIST_ROWS, MNIST_COLS,
                    net->conv1.weights, net->conv1.biases,
                    CNN_CONV1_FILTERS, CNN_KERNEL, CNN_PADDING, 1,
-                   net->conv1_out, CNN_CONV1_H, CNN_CONV1_W);
+                   net->conv1_out, CNN_CONV1_H, CNN_CONV1_W, net->conv1.col);
     relu_inplace(net->conv1_out, CNN_CONV1_UNITS);
 
     maxpool2d_forward(net->conv1_out, CNN_CONV1_FILTERS, CNN_CONV1_H, CNN_CONV1_W,
@@ -164,7 +167,7 @@ void cnn_forward(CNN *net, const float *input)
     conv2d_forward(net->pool1_out, CNN_CONV1_FILTERS, CNN_POOL1_H, CNN_POOL1_W,
                    net->conv2.weights, net->conv2.biases,
                    CNN_CONV2_FILTERS, CNN_KERNEL, CNN_PADDING, 1,
-                   net->conv2_out, CNN_CONV2_H, CNN_CONV2_W);
+                   net->conv2_out, CNN_CONV2_H, CNN_CONV2_W, net->conv2.col);
     relu_inplace(net->conv2_out, CNN_CONV2_UNITS);
 
     maxpool2d_forward(net->conv2_out, CNN_CONV2_FILTERS, CNN_CONV2_H, CNN_CONV2_W,
@@ -225,7 +228,8 @@ void cnn_backward(CNN *net, int label)
     conv2d_backward(net->pool1_out, CNN_CONV1_FILTERS, CNN_POOL1_H, CNN_POOL1_W,
                     net->conv2.weights, CNN_CONV2_FILTERS, CNN_KERNEL, CNN_PADDING, 1,
                     net->d_conv2_out, CNN_CONV2_H, CNN_CONV2_W,
-                    net->conv2.weight_grad, net->conv2.bias_grad, net->d_pool1_out);
+                    net->conv2.weight_grad, net->conv2.bias_grad, net->d_pool1_out,
+                    net->conv2.col);
 
     maxpool2d_backward(net->d_pool1_out, CNN_CONV1_FILTERS, CNN_POOL1_H, CNN_POOL1_W,
                        net->pool1.argmax, CNN_CONV1_H, CNN_CONV1_W, net->d_conv1_out);
@@ -234,7 +238,8 @@ void cnn_backward(CNN *net, int label)
     conv2d_backward(net->input, 1, MNIST_ROWS, MNIST_COLS,
                     net->conv1.weights, CNN_CONV1_FILTERS, CNN_KERNEL, CNN_PADDING, 1,
                     net->d_conv1_out, CNN_CONV1_H, CNN_CONV1_W,
-                    net->conv1.weight_grad, net->conv1.bias_grad, NULL);
+                    net->conv1.weight_grad, net->conv1.bias_grad, NULL,
+                    net->conv1.col);
 }
 
 static void conv_step(ConvLayer *layer, float learning_rate, float momentum)

@@ -5,6 +5,7 @@
 #include "../conv.h"
 
 static int failures;
+static float scratch[8192];
 
 static void expect_close(const char *label, float actual, float expected, float tolerance)
 {
@@ -29,11 +30,16 @@ static void test_forward_known(void)
     float kernel[4] = {1, 0, 0, -1};
     float bias[1] = {0};
     float output[4];
+    float direct[4];
+    float column[16];
 
-    conv2d_forward(input, 1, 3, 3, kernel, bias, 1, 2, 0, 1, output, 2, 2);
+    conv2d_forward(input, 1, 3, 3, kernel, bias, 1, 2, 0, 1, output, 2, 2, column);
+    conv2d_direct_forward(input, 1, 3, 3, kernel, bias, 1, 2, 0, 1, direct, 2, 2);
 
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         expect_close("known 2x2 conv", output[i], -4.0f, 1e-5f);
+        expect_close("known 2x2 direct conv", direct[i], -4.0f, 1e-5f);
+    }
 }
 
 static void test_forward_padding(void)
@@ -43,7 +49,7 @@ static void test_forward_padding(void)
     float bias[1] = {0};
     float output[9];
 
-    conv2d_forward(input, 1, 1, 1, kernel, bias, 1, 3, 1, 1, output, 3, 3);
+    conv2d_forward(input, 1, 1, 1, kernel, bias, 1, 3, 1, 1, output, 3, 3, scratch);
 
     /* The single pixel sits at (1, 1) of the zero-padded 3x3 image, so every
        output window covering the top-left 2x2 region sees it. */
@@ -62,7 +68,7 @@ static void test_forward_multichannel(void)
     float bias[1] = {0};
     float output[4];
 
-    conv2d_forward(input, 2, 2, 2, kernel, bias, 1, 1, 0, 1, output, 2, 2);
+    conv2d_forward(input, 2, 2, 2, kernel, bias, 1, 1, 0, 1, output, 2, 2, scratch);
 
     for (int i = 0; i < 4; i++)
         expect_close("multi-channel conv", output[i], -1.0f, 1e-6f);
@@ -90,7 +96,7 @@ static float conv_loss(const float *input, const float *weights, const float *bi
     float output[OUT_C * OUT_H * OUT_W];
 
     conv2d_forward(input, IN_C, IN_H, IN_W, weights, biases, OUT_C, K, 0, 1,
-                   output, OUT_H, OUT_W);
+                   output, OUT_H, OUT_W, scratch);
 
     float loss = 0.0f;
     for (int i = 0; i < OUT_C * OUT_H * OUT_W; i++)
@@ -122,7 +128,7 @@ static void test_backward_numeric(void)
         upstream[i] = random_float();
 
     conv2d_backward(input, IN_C, IN_H, IN_W, weights, OUT_C, K, 0, 1,
-                    upstream, OUT_H, OUT_W, weight_grad, bias_grad, input_grad);
+                    upstream, OUT_H, OUT_W, weight_grad, bias_grad, input_grad, scratch);
 
     const float epsilon = 1e-2f;
     char label[64];
@@ -212,12 +218,64 @@ static void test_pool_backward(void)
     }
 }
 
+static void test_optimized_matches_direct(void)
+{
+    enum { C = 3, H = 5, W = 5, OC = 2, KK = 3, PAD = 1, OH = 5, OW = 5 };
+
+    float input[C * H * W];
+    float weights[OC * C * KK * KK];
+    float biases[OC];
+    float upstream[OC * OH * OW];
+    float column[C * KK * KK * OH * OW];
+
+    float out_fast[OC * OH * OW];
+    float out_ref[OC * OH * OW];
+
+    float dw_fast[OC * C * KK * KK] = {0};
+    float db_fast[OC] = {0};
+    float dx_fast[C * H * W] = {0};
+
+    float dw_ref[OC * C * KK * KK] = {0};
+    float db_ref[OC] = {0};
+    float dx_ref[C * H * W] = {0};
+
+    for (int i = 0; i < C * H * W; i++)
+        input[i] = random_float();
+    for (int i = 0; i < OC * C * KK * KK; i++)
+        weights[i] = random_float();
+    for (int i = 0; i < OC; i++)
+        biases[i] = random_float();
+    for (int i = 0; i < OC * OH * OW; i++)
+        upstream[i] = random_float();
+
+    conv2d_forward(input, C, H, W, weights, biases, OC, KK, PAD, 1,
+                   out_fast, OH, OW, column);
+    conv2d_direct_forward(input, C, H, W, weights, biases, OC, KK, PAD, 1,
+                          out_ref, OH, OW);
+
+    for (int i = 0; i < OC * OH * OW; i++)
+        expect_close("im2col forward", out_fast[i], out_ref[i], 1e-5f);
+
+    conv2d_backward(input, C, H, W, weights, OC, KK, PAD, 1, upstream, OH, OW,
+                    dw_fast, db_fast, dx_fast, column);
+    conv2d_direct_backward(input, C, H, W, weights, OC, KK, PAD, 1, upstream, OH, OW,
+                           dw_ref, db_ref, dx_ref);
+
+    for (int i = 0; i < OC * C * KK * KK; i++)
+        expect_close("im2col weight grad", dw_fast[i], dw_ref[i], 1e-5f);
+    for (int i = 0; i < OC; i++)
+        expect_close("im2col bias grad", db_fast[i], db_ref[i], 1e-5f);
+    for (int i = 0; i < C * H * W; i++)
+        expect_close("im2col input grad", dx_fast[i], dx_ref[i], 1e-5f);
+}
+
 int main(void)
 {
     test_out_size();
     test_forward_known();
     test_forward_padding();
     test_forward_multichannel();
+    test_optimized_matches_direct();
     test_backward_numeric();
     test_pool_forward();
     test_pool_backward();
