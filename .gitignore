@@ -55,6 +55,9 @@ dkms.conf
 /main
 /cnn
 
+# Saved model weights
+*.cnn
+
 # Build output
 /build/
 

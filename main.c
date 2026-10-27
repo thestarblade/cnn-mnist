@@ -5,6 +5,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "checkpoint.h"
 #include "cnn.h"
 #include "mnist.h"
 
@@ -37,6 +38,8 @@ typedef struct {
     float momentum;
     unsigned int seed;
     const char *data_dir;
+    const char *load_path;
+    const char *save_path;
 } Options;
 
 static void print_usage(const char *program)
@@ -50,6 +53,8 @@ static void print_usage(const char *program)
            "  --momentum F      SGD momentum (default %.2f)\n"
            "  --seed N          random seed (default: current time)\n"
            "  --data-dir DIR    directory holding the IDX files (default %s)\n"
+           "  --load PATH       start from a saved checkpoint\n"
+           "  --save PATH       write the trained weights to PATH\n"
            "  -h, --help        show this help\n",
            program, EPOCHS, BATCH_SIZE, LEARNING_RATE, MOMENTUM, DEFAULT_DATA_DIR);
 }
@@ -137,6 +142,16 @@ static int parse_options(int argc, char **argv, Options *options)
                 return -1;
             }
             options->data_dir = value;
+        } else if (strcmp(arg, "--load") == 0) {
+            value = option_value(argc, argv, &i, arg);
+            if (!value)
+                return -1;
+            options->load_path = value;
+        } else if (strcmp(arg, "--save") == 0) {
+            value = option_value(argc, argv, &i, arg);
+            if (!value)
+                return -1;
+            options->save_path = value;
         } else {
             fprintf(stderr, "error: unknown option %s\n", arg);
             return -1;
@@ -192,6 +207,8 @@ int main(int argc, char **argv)
         .momentum = MOMENTUM,
         .seed = SEED,
         .data_dir = DEFAULT_DATA_DIR,
+        .load_path = NULL,
+        .save_path = NULL,
     };
 
     if (parse_options(argc, argv, &options) != 0) {
@@ -223,6 +240,13 @@ int main(int argc, char **argv)
 
     CNN net;
     cnn_init(&net);
+
+    if (options.load_path && checkpoint_load(&net, options.load_path) != 0) {
+        cnn_free(&net);
+        mnist_free(&data);
+        return 1;
+    }
+
     mnist_shuffle(&data, data.count);
 
     int train_size = (int)(data.count * TRAIN_SPLIT);
@@ -274,8 +298,12 @@ int main(int argc, char **argv)
 
     printf("Final accuracy: %.2f%%\n", accuracy);
 
+    int status = 0;
+    if (options.save_path && checkpoint_save(&net, options.save_path) != 0)
+        status = 1;
+
     cnn_free(&net);
     mnist_free(&data);
 
-    return 0;
+    return status;
 }

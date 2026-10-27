@@ -15,7 +15,7 @@ WARNINGS := -Wall -Wextra
 LDLIBS   := -lm
 
 TARGET   := cnn
-LIB_SRCS := mnist.c layer.c conv.c cnn.c
+LIB_SRCS := mnist.c layer.c conv.c cnn.c checkpoint.c
 APP_SRCS := main.c $(LIB_SRCS)
 
 RELEASE_DIR := build/release
