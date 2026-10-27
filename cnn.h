@@ -31,8 +31,10 @@
 #define CNN_POOL2_UNITS (CNN_CONV2_FILTERS * CNN_POOL2_H * CNN_POOL2_W)
 
 typedef struct {
-    float *weights; /* out_c x in_c x k x k */
-    float *biases;  /* out_c */
+    float *weights;    /* out_c x in_c x k x k */
+    float *biases;     /* out_c */
+    float *weight_grad; /* same shape as weights, accumulated */
+    float *bias_grad;   /* out_c, accumulated */
     int in_c, in_h, in_w;
     int out_c, out_h, out_w;
     int k, pad, stride;
@@ -62,6 +64,13 @@ typedef struct {
     float *fc1_out;
     float *logits;
     float *probs;
+
+    /* Gradients w.r.t. the activations, reused by every backward pass. */
+    float *d_conv1_out;
+    float *d_pool1_out;
+    float *d_conv2_out;
+    float *d_pool2_out;
+    float *d_fc1_out;
 } CNN;
 
 void cnn_init(CNN *net);
@@ -71,5 +80,11 @@ void cnn_free(CNN *net);
 void cnn_forward(CNN *net, const float *input);
 
 int cnn_predict(CNN *net, const float *input);
+
+/* Must be called after cnn_forward() on the same sample. Gradients are
+ * accumulated into the layer buffers, so zero them once per mini-batch. */
+void cnn_backward(CNN *net, int label);
+
+void cnn_zero_grad(CNN *net);
 
 #endif

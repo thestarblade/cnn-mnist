@@ -148,6 +148,106 @@ static void test_predict_matches_argmax(void)
     cnn_free(&net);
 }
 
+static float cross_entropy(CNN *net, const float *input, int label)
+{
+    cnn_forward(net, input);
+    return -logf(net->probs[label] + 1e-12f);
+}
+
+static void numeric_gradient(CNN *net, const float *input, int label, float *param,
+                             float epsilon, float *result)
+{
+    float original = *param;
+
+    *param = original + epsilon;
+    float plus = cross_entropy(net, input, label);
+    *param = original - epsilon;
+    float minus = cross_entropy(net, input, label);
+    *param = original;
+
+    *result = (plus - minus) / (2.0f * epsilon);
+}
+
+static void check_gradient_sample(CNN *net, const float *input, int label,
+                                  float *params, const float *grads, int count,
+                                  const char *name, int *checked, int *matched)
+{
+    int step = count / 10;
+    if (step < 1)
+        step = 1;
+
+    int samples = 0;
+    for (int i = 0; i < count && samples < 10; i += step, samples++) {
+        float coarse, fine;
+
+        numeric_gradient(net, input, label, &params[i], 2e-3f, &coarse);
+        numeric_gradient(net, input, label, &params[i], 1e-3f, &fine);
+
+        float scale = fabsf(coarse) + fabsf(fine) + 1e-6f;
+        if (fabsf(coarse - fine) > 0.02f * scale)
+            continue; /* ReLU or pooling kink: not a usable sample */
+
+        (*checked)++;
+
+        float tolerance = 1e-3f + 2e-2f * fabsf(fine);
+        if (fabsf(grads[i] - fine) > tolerance) {
+            fprintf(stderr, "FAIL %s grad %d: analytic %.6f, numeric %.6f\n",
+                    name, i, grads[i], fine);
+            failures++;
+        } else {
+            (*matched)++;
+        }
+    }
+}
+
+static void test_backward_matches_finite_differences(void)
+{
+    int checked = 0, matched = 0;
+
+    srand(23);
+    CNN net;
+    cnn_init(&net);
+
+    float input[MNIST_PIXELS];
+    unsigned int state = 999u;
+    for (int i = 0; i < MNIST_PIXELS; i++) {
+        state = state * 1664525u + 1013904223u;
+        input[i] = (float)((state >> 8) & 0xFFFFu) / 65535.0f;
+    }
+
+    const int label = 3;
+
+    cnn_zero_grad(&net);
+    cnn_forward(&net, input);
+    cnn_backward(&net, label);
+
+    check_gradient_sample(&net, input, label, net.fc2.weights, net.fc2.weight_grad,
+                          net.fc2.input_size * net.fc2.output_size,
+                          "fc2 weight", &checked, &matched);
+    check_gradient_sample(&net, input, label, net.fc2.biases, net.fc2.bias_grad,
+                          net.fc2.output_size, "fc2 bias", &checked, &matched);
+    check_gradient_sample(&net, input, label, net.fc1.weights, net.fc1.weight_grad,
+                          net.fc1.input_size * net.fc1.output_size,
+                          "fc1 weight", &checked, &matched);
+    check_gradient_sample(&net, input, label, net.conv2.weights, net.conv2.weight_grad,
+                          net.conv2.out_c * net.conv2.in_c * net.conv2.k * net.conv2.k,
+                          "conv2 weight", &checked, &matched);
+    check_gradient_sample(&net, input, label, net.conv1.weights, net.conv1.weight_grad,
+                          net.conv1.out_c * net.conv1.in_c * net.conv1.k * net.conv1.k,
+                          "conv1 weight", &checked, &matched);
+
+    if (checked < 20) {
+        fprintf(stderr, "FAIL gradient check: only %d stable samples (need 20)\n", checked);
+        failures++;
+    }
+    if (matched != checked) {
+        fprintf(stderr, "FAIL gradient check: %d of %d samples mismatched\n",
+                checked - matched, checked);
+    }
+
+    cnn_free(&net);
+}
+
 int main(void)
 {
     test_shapes();
@@ -155,6 +255,7 @@ int main(void)
     test_forward_is_deterministic();
     test_activations();
     test_predict_matches_argmax();
+    test_backward_matches_finite_differences();
 
     if (failures > 0) {
         fprintf(stderr, "test_cnn: %d check(s) failed\n", failures);

@@ -29,6 +29,8 @@ static void conv_init(ConvLayer *layer, int in_c, int in_h, int in_w,
 
     layer->weights = malloc(count * sizeof(float));
     layer->biases = calloc((size_t)out_c, sizeof(float));
+    layer->weight_grad = calloc(count, sizeof(float));
+    layer->bias_grad = calloc((size_t)out_c, sizeof(float));
 
     float fan_in = (float)(in_c * k * k);
     for (size_t i = 0; i < count; i++)
@@ -39,8 +41,12 @@ static void conv_free(ConvLayer *layer)
 {
     free(layer->weights);
     free(layer->biases);
+    free(layer->weight_grad);
+    free(layer->bias_grad);
     layer->weights = NULL;
     layer->biases = NULL;
+    layer->weight_grad = NULL;
+    layer->bias_grad = NULL;
 }
 
 static void pool_init(PoolLayer *layer, int channels, int in_h, int in_w, int size, int stride)
@@ -89,6 +95,12 @@ void cnn_init(CNN *net)
     net->fc1_out = malloc(CNN_FC1_SIZE * sizeof(float));
     net->logits = malloc(CNN_CLASSES * sizeof(float));
     net->probs = malloc(CNN_CLASSES * sizeof(float));
+
+    net->d_conv1_out = malloc(CNN_CONV1_UNITS * sizeof(float));
+    net->d_pool1_out = malloc(CNN_POOL1_UNITS * sizeof(float));
+    net->d_conv2_out = malloc(CNN_CONV2_UNITS * sizeof(float));
+    net->d_pool2_out = malloc(CNN_POOL2_UNITS * sizeof(float));
+    net->d_fc1_out = malloc(CNN_FC1_SIZE * sizeof(float));
 }
 
 void cnn_free(CNN *net)
@@ -108,6 +120,11 @@ void cnn_free(CNN *net)
     free(net->fc1_out);
     free(net->logits);
     free(net->probs);
+    free(net->d_conv1_out);
+    free(net->d_pool1_out);
+    free(net->d_conv2_out);
+    free(net->d_pool2_out);
+    free(net->d_fc1_out);
 
     net->input = NULL;
     net->conv1_out = NULL;
@@ -117,6 +134,11 @@ void cnn_free(CNN *net)
     net->fc1_out = NULL;
     net->logits = NULL;
     net->probs = NULL;
+    net->d_conv1_out = NULL;
+    net->d_pool1_out = NULL;
+    net->d_conv2_out = NULL;
+    net->d_pool2_out = NULL;
+    net->d_fc1_out = NULL;
 }
 
 void cnn_forward(CNN *net, const float *input)
@@ -161,4 +183,50 @@ int cnn_predict(CNN *net, const float *input)
     }
 
     return best;
+}
+
+void cnn_zero_grad(CNN *net)
+{
+    size_t conv1_weights = (size_t)CNN_CONV1_FILTERS * 1 * CNN_KERNEL * CNN_KERNEL;
+    size_t conv2_weights = (size_t)CNN_CONV2_FILTERS * CNN_CONV1_FILTERS * CNN_KERNEL * CNN_KERNEL;
+
+    memset(net->conv1.weight_grad, 0, conv1_weights * sizeof(float));
+    memset(net->conv1.bias_grad, 0, CNN_CONV1_FILTERS * sizeof(float));
+    memset(net->conv2.weight_grad, 0, conv2_weights * sizeof(float));
+    memset(net->conv2.bias_grad, 0, CNN_CONV2_FILTERS * sizeof(float));
+
+    dense_zero_grad(&net->fc1);
+    dense_zero_grad(&net->fc2);
+}
+
+void cnn_backward(CNN *net, int label)
+{
+    float d_logits[CNN_CLASSES];
+
+    /* Softmax + cross-entropy simplifies to probs - onehot. */
+    for (int i = 0; i < CNN_CLASSES; i++)
+        d_logits[i] = net->probs[i] - (i == label ? 1.0f : 0.0f);
+
+    dense_backward_accumulate(&net->fc2, net->fc1_out, d_logits, net->d_fc1_out);
+    relu_backward(net->d_fc1_out, net->fc1_out, CNN_FC1_SIZE);
+
+    dense_backward_accumulate(&net->fc1, net->pool2_out, net->d_fc1_out, net->d_pool2_out);
+
+    maxpool2d_backward(net->d_pool2_out, CNN_CONV2_FILTERS, CNN_POOL2_H, CNN_POOL2_W,
+                       net->pool2.argmax, CNN_CONV2_H, CNN_CONV2_W, net->d_conv2_out);
+    relu_backward(net->d_conv2_out, net->conv2_out, CNN_CONV2_UNITS);
+
+    conv2d_backward(net->pool1_out, CNN_CONV1_FILTERS, CNN_POOL1_H, CNN_POOL1_W,
+                    net->conv2.weights, CNN_CONV2_FILTERS, CNN_KERNEL, CNN_PADDING, 1,
+                    net->d_conv2_out, CNN_CONV2_H, CNN_CONV2_W,
+                    net->conv2.weight_grad, net->conv2.bias_grad, net->d_pool1_out);
+
+    maxpool2d_backward(net->d_pool1_out, CNN_CONV1_FILTERS, CNN_POOL1_H, CNN_POOL1_W,
+                       net->pool1.argmax, CNN_CONV1_H, CNN_CONV1_W, net->d_conv1_out);
+    relu_backward(net->d_conv1_out, net->conv1_out, CNN_CONV1_UNITS);
+
+    conv2d_backward(net->input, 1, MNIST_ROWS, MNIST_COLS,
+                    net->conv1.weights, CNN_CONV1_FILTERS, CNN_KERNEL, CNN_PADDING, 1,
+                    net->d_conv1_out, CNN_CONV1_H, CNN_CONV1_W,
+                    net->conv1.weight_grad, net->conv1.bias_grad, NULL);
 }
