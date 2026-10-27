@@ -1,244 +1,309 @@
+#include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <math.h>
+#include <string.h>
 #include <time.h>
 
-#define INPUT_SIZE 784
-#define HIDDEN_SIZE 256
-#define OUTPUT_SIZE 10
-#define LEARNING_RATE 0.0005f
+#include "checkpoint.h"
+#include "cnn.h"
+#include "mnist.h"
+
+#ifndef EPOCHS
+#define EPOCHS 10
+#endif
+#ifndef BATCH_SIZE
+#define BATCH_SIZE 32
+#endif
+#ifndef LEARNING_RATE
+#define LEARNING_RATE 0.01f
+#endif
+#ifndef MOMENTUM
 #define MOMENTUM 0.9f
-#define EPOCHS 20
-#define IMAGE_SIZE 28
+#endif
+#ifndef TRAIN_SPLIT
 #define TRAIN_SPLIT 0.8
+#endif
+#ifndef SEED
+#define SEED 0
+#endif
 
-#define TRAIN_IMG_PATH "data/train-images.idx3-ubyte"
-#define TRAIN_LBL_PATH "data/train-labels.idx1-ubyte"
-
-typedef struct {
-    float *weights, *biases, *weight_momentum, *bias_momentum;
-    int input_size, output_size;
-} Layer;
-
-typedef struct {
-    Layer hidden, output;
-} Network;
+#define DEFAULT_DATA_DIR "data"
+#define PATH_LENGTH 512
 
 typedef struct {
-    unsigned char *images, *labels;
-    int nImages;
-} InputData;
+    int epochs;
+    int batch_size;
+    float learning_rate;
+    float momentum;
+    unsigned int seed;
+    const char *data_dir;
+    const char *load_path;
+    const char *save_path;
+} Options;
 
-void softmax(float *input, int size) {
-    float max = input[0], sum = 0;
-    for (int i = 1; i < size; i++)
-        if (input[i] > max) max = input[i];
-    for (int i = 0; i < size; i++) {
-        input[i] = expf(input[i] - max);
-        sum += input[i];
+static void print_usage(const char *program)
+{
+    printf("Usage: %s [options]\n"
+           "\n"
+           "Options:\n"
+           "  --epochs N        number of epochs (default %d, 0 = evaluate only)\n"
+           "  --batch-size N    samples per gradient step (default %d)\n"
+           "  --lr F            learning rate (default %.4f)\n"
+           "  --momentum F      SGD momentum (default %.2f)\n"
+           "  --seed N          random seed (default: current time)\n"
+           "  --data-dir DIR    directory holding the IDX files (default %s)\n"
+           "  --load PATH       start from a saved checkpoint\n"
+           "  --save PATH       write the trained weights to PATH\n"
+           "  -h, --help        show this help\n",
+           program, EPOCHS, BATCH_SIZE, LEARNING_RATE, MOMENTUM, DEFAULT_DATA_DIR);
+}
+
+static const char *option_value(int argc, char **argv, int *index, const char *name)
+{
+    if (*index + 1 >= argc) {
+        fprintf(stderr, "error: %s requires a value\n", name);
+        return NULL;
     }
-    for (int i = 0; i < size; i++)
-        input[i] /= sum;
+
+    (*index)++;
+    return argv[*index];
 }
 
-void init_layer(Layer *layer, int in_size, int out_size) {
-    int n = in_size * out_size;
-    float scale = sqrtf(2.0f / in_size);
+static int parse_int(const char *text, int *value)
+{
+    char *end;
+    long parsed = strtol(text, &end, 10);
 
-    layer->input_size = in_size;
-    layer->output_size = out_size;
-    layer->weights = malloc(n * sizeof(float));
-    layer->biases = calloc(out_size, sizeof(float));
-    layer->weight_momentum = calloc(n, sizeof(float));
-    layer->bias_momentum = calloc(out_size, sizeof(float));
+    if (*text == '\0' || *end != '\0' || parsed < INT_MIN || parsed > INT_MAX)
+        return -1;
 
-    for (int i = 0; i < n; i++)
-        layer->weights[i] = ((float)rand() / RAND_MAX - 0.5f) * 2 * scale;
+    *value = (int)parsed;
+    return 0;
 }
 
-void forward(Layer *layer, float *input, float *output, int relu) {
-    for (int i = 0; i < layer->output_size; i++)
-        output[i] = layer->biases[i];
+static int parse_float(const char *text, float *value)
+{
+    char *end;
+    float parsed = strtof(text, &end);
 
-    for (int j = 0; j < layer->input_size; j++) {
-        float in_j = input[j];
-        if (in_j == 0.0f) continue;
-        float *weight_row = &layer->weights[j * layer->output_size];
-        for (int i = 0; i < layer->output_size; i++) {
-            output[i] += in_j * weight_row[i];
+    if (*text == '\0' || *end != '\0' || !isfinite(parsed))
+        return -1;
+
+    *value = parsed;
+    return 0;
+}
+
+static int parse_options(int argc, char **argv, Options *options)
+{
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *value;
+
+        if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
+            print_usage(argv[0]);
+            exit(0);
+        } else if (strcmp(arg, "--epochs") == 0) {
+            value = option_value(argc, argv, &i, arg);
+            if (!value || parse_int(value, &options->epochs) != 0) {
+                fprintf(stderr, "error: invalid value for %s\n", arg);
+                return -1;
+            }
+        } else if (strcmp(arg, "--batch-size") == 0) {
+            value = option_value(argc, argv, &i, arg);
+            if (!value || parse_int(value, &options->batch_size) != 0) {
+                fprintf(stderr, "error: invalid value for %s\n", arg);
+                return -1;
+            }
+        } else if (strcmp(arg, "--lr") == 0) {
+            value = option_value(argc, argv, &i, arg);
+            if (!value || parse_float(value, &options->learning_rate) != 0) {
+                fprintf(stderr, "error: invalid value for %s\n", arg);
+                return -1;
+            }
+        } else if (strcmp(arg, "--momentum") == 0) {
+            value = option_value(argc, argv, &i, arg);
+            if (!value || parse_float(value, &options->momentum) != 0) {
+                fprintf(stderr, "error: invalid value for %s\n", arg);
+                return -1;
+            }
+        } else if (strcmp(arg, "--seed") == 0) {
+            int seed;
+            value = option_value(argc, argv, &i, arg);
+            if (!value || parse_int(value, &seed) != 0) {
+                fprintf(stderr, "error: invalid value for %s\n", arg);
+                return -1;
+            }
+            options->seed = (unsigned int)seed;
+        } else if (strcmp(arg, "--data-dir") == 0) {
+            value = option_value(argc, argv, &i, arg);
+            if (!value) {
+                fprintf(stderr, "error: %s requires a value\n", arg);
+                return -1;
+            }
+            options->data_dir = value;
+        } else if (strcmp(arg, "--load") == 0) {
+            value = option_value(argc, argv, &i, arg);
+            if (!value)
+                return -1;
+            options->load_path = value;
+        } else if (strcmp(arg, "--save") == 0) {
+            value = option_value(argc, argv, &i, arg);
+            if (!value)
+                return -1;
+            options->save_path = value;
+        } else {
+            fprintf(stderr, "error: unknown option %s\n", arg);
+            return -1;
         }
     }
 
-    if (relu)
-        for (int i = 0; i < layer->output_size; i++)
-            output[i] = output[i] > 0 ? output[i] : 0;
-}
-
-
-void backward(Layer *layer, float *input, float *output_grad, float *input_grad, float lr) {
-    for (int j = 0; j < layer->input_size; j++) {
-        float in_j = input[j];
-        if (in_j == 0.0f && !input_grad) continue;
-        float *weight_row = &layer->weights[j * layer->output_size];
-        float *momentum_row = &layer->weight_momentum[j * layer->output_size];
-        float grad_j = 0.0f;
-        for (int i = 0; i < layer->output_size; i++) {
-            grad_j += output_grad[i] * weight_row[i];
-            momentum_row[i] = MOMENTUM * momentum_row[i] + lr * output_grad[i] * in_j;
-            weight_row[i] -= momentum_row[i];
-        }
-        if (input_grad)
-            input_grad[j] = grad_j;
+    if (options->epochs < 0) {
+        fprintf(stderr, "error: --epochs must be >= 0\n");
+        return -1;
     }
-
-    for (int i = 0; i < layer->output_size; i++) {
-        layer->bias_momentum[i] = MOMENTUM * layer->bias_momentum[i] + lr * output_grad[i];
-        layer->biases[i] -= layer->bias_momentum[i];
+    if (options->batch_size < 1) {
+        fprintf(stderr, "error: --batch-size must be >= 1\n");
+        return -1;
     }
-}
-
-
-float* train(Network *net, float *input, int label, float lr) {
-    static float final_output[OUTPUT_SIZE];
-    float hidden_output[HIDDEN_SIZE];
-    float output_grad[OUTPUT_SIZE] = {0}, hidden_grad[HIDDEN_SIZE] = {0};
-
-    forward(&net->hidden, input, hidden_output, 1);
-    forward(&net->output, hidden_output, final_output, 0);
-    softmax(final_output, OUTPUT_SIZE);
-
-    for (int i = 0; i < OUTPUT_SIZE; i++)
-        output_grad[i] = final_output[i] - (i == label);
-
-    backward(&net->output, hidden_output, output_grad, hidden_grad, lr);
-
-    for (int i = 0; i < HIDDEN_SIZE; i++)
-        hidden_grad[i] *= hidden_output[i] > 0 ? 1 : 0;  // ReLU derivative
-
-    backward(&net->hidden, input, hidden_grad, NULL, lr);
-
-    return final_output;
-}
-
-int predict(Network *net, float *input) {
-    float hidden_output[HIDDEN_SIZE], final_output[OUTPUT_SIZE];
-
-    forward(&net->hidden, input, hidden_output, 1);
-    forward(&net->output, hidden_output, final_output, 0);
-    softmax(final_output, OUTPUT_SIZE);
-
-    int max_index = 0;
-    for (int i = 1; i < OUTPUT_SIZE; i++)
-        if (final_output[i] > final_output[max_index])
-            max_index = i;
-
-    return max_index;
-}
-
-void read_mnist_images(const char *filename, unsigned char **images, int *nImages) {
-    FILE *file = fopen(filename, "rb");
-    if (!file) exit(1);
-
-    int temp, rows, cols;
-    fread(&temp, sizeof(int), 1, file);
-    fread(nImages, sizeof(int), 1, file);
-    *nImages = __builtin_bswap32(*nImages);
-
-    fread(&rows, sizeof(int), 1, file);
-    fread(&cols, sizeof(int), 1, file);
-
-    rows = __builtin_bswap32(rows);
-    cols = __builtin_bswap32(cols);
-
-    *images = malloc((*nImages) * IMAGE_SIZE * IMAGE_SIZE);
-    fread(*images, sizeof(unsigned char), (*nImages) * IMAGE_SIZE * IMAGE_SIZE, file);
-    fclose(file);
-}
-
-void read_mnist_labels(const char *filename, unsigned char **labels, int *nLabels) {
-    FILE *file = fopen(filename, "rb");
-    if (!file) exit(1);
-
-    int temp;
-    fread(&temp, sizeof(int), 1, file);
-    fread(nLabels, sizeof(int), 1, file);
-    *nLabels = __builtin_bswap32(*nLabels);
-
-    *labels = malloc(*nLabels);
-    fread(*labels, sizeof(unsigned char), *nLabels, file);
-    fclose(file);
-}
-
-void shuffle_data(unsigned char *images, unsigned char *labels, int n) {
-    for (int i = n - 1; i > 0; i--) {
-        int j = rand() % (i + 1);
-        for (int k = 0; k < INPUT_SIZE; k++) {
-            unsigned char temp = images[i * INPUT_SIZE + k];
-            images[i * INPUT_SIZE + k] = images[j * INPUT_SIZE + k];
-            images[j * INPUT_SIZE + k] = temp;
-        }
-        unsigned char temp = labels[i];
-        labels[i] = labels[j];
-        labels[j] = temp;
+    if (options->learning_rate <= 0.0f) {
+        fprintf(stderr, "error: --lr must be > 0\n");
+        return -1;
     }
-}
-
-
-int main() {
-    Network net;
-    InputData data = {0};
-    float learning_rate = LEARNING_RATE, img[INPUT_SIZE];
-    clock_t start, end;
-    double cpu_time_used;
-
-    srand(time(NULL));
-
-    init_layer(&net.hidden, INPUT_SIZE, HIDDEN_SIZE);
-    init_layer(&net.output, HIDDEN_SIZE, OUTPUT_SIZE);
-
-    read_mnist_images(TRAIN_IMG_PATH, &data.images, &data.nImages);
-    read_mnist_labels(TRAIN_LBL_PATH, &data.labels, &data.nImages);
-
-    shuffle_data(data.images, data.labels, data.nImages);
-
-    int train_size = (int)(data.nImages * TRAIN_SPLIT);
-    int test_size = data.nImages - train_size;
-
-    for (int epoch = 0; epoch < EPOCHS; epoch++) {
-        start = clock();
-        shuffle_data(data.images, data.labels, train_size);
-        float total_loss = 0;
-        for (int i = 0; i < train_size; i++) {
-            for (int k = 0; k < INPUT_SIZE; k++)
-                img[k] = data.images[i * INPUT_SIZE + k] / 255.0f;
-
-            float* final_output = train(&net, img, data.labels[i], learning_rate);
-            total_loss += -logf(final_output[data.labels[i]] + 1e-10f);
-        }
-        int correct = 0;
-        for (int i = train_size; i < data.nImages; i++) {
-            for (int k = 0; k < INPUT_SIZE; k++)
-                img[k] = data.images[i * INPUT_SIZE + k] / 255.0f;
-            if (predict(&net, img) == data.labels[i])
-                correct++;
-        }
-        end = clock();
-        cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
-
-        printf("Epoch %d, Accuracy: %.2f%%, Avg Loss: %.4f, Time: %.2f seconds\n", 
-               epoch + 1, (float)correct / test_size * 100, total_loss / train_size, cpu_time_used);
+    if (options->momentum < 0.0f || options->momentum >= 1.0f) {
+        fprintf(stderr, "error: --momentum must be in [0, 1)\n");
+        return -1;
     }
-
-    free(net.hidden.weights);
-    free(net.hidden.biases);
-    free(net.hidden.weight_momentum);
-    free(net.hidden.bias_momentum);
-    free(net.output.weights);
-    free(net.output.biases);
-    free(net.output.weight_momentum);
-    free(net.output.bias_momentum);
-    free(data.images);
-    free(data.labels);
 
     return 0;
+}
+
+static void normalize_image(const unsigned char *pixels, float *output)
+{
+    for (int i = 0; i < MNIST_PIXELS; i++)
+        output[i] = (float)pixels[i] / 255.0f;
+}
+
+static float evaluate(CNN *net, const MNIST *data, int start, int count, float *image)
+{
+    int correct = 0;
+
+    for (int i = 0; i < count; i++) {
+        int index = start + i;
+        normalize_image(data->images + (size_t)index * MNIST_PIXELS, image);
+        if (cnn_predict(net, image) == data->labels[index])
+            correct++;
+    }
+
+    return count > 0 ? (float)correct / (float)count * 100.0f : 0.0f;
+}
+
+int main(int argc, char **argv)
+{
+    Options options = {
+        .epochs = EPOCHS,
+        .batch_size = BATCH_SIZE,
+        .learning_rate = LEARNING_RATE,
+        .momentum = MOMENTUM,
+        .seed = SEED,
+        .data_dir = DEFAULT_DATA_DIR,
+        .load_path = NULL,
+        .save_path = NULL,
+    };
+
+    if (parse_options(argc, argv, &options) != 0) {
+        print_usage(argv[0]);
+        return 2;
+    }
+
+    if (options.seed == 0)
+        options.seed = (unsigned int)time(NULL);
+
+    char images_path[PATH_LENGTH];
+    char labels_path[PATH_LENGTH];
+    int images_length = snprintf(images_path, sizeof(images_path),
+                                 "%s/train-images.idx3-ubyte", options.data_dir);
+    int labels_length = snprintf(labels_path, sizeof(labels_path),
+                                 "%s/train-labels.idx1-ubyte", options.data_dir);
+
+    if (images_length < 0 || images_length >= (int)sizeof(images_path) ||
+        labels_length < 0 || labels_length >= (int)sizeof(labels_path)) {
+        fprintf(stderr, "error: --data-dir path is too long\n");
+        return 2;
+    }
+
+    MNIST data;
+    if (mnist_load(images_path, labels_path, &data) != 0)
+        return 1;
+
+    srand(options.seed);
+
+    CNN net;
+    cnn_init(&net);
+
+    if (options.load_path && checkpoint_load(&net, options.load_path) != 0) {
+        cnn_free(&net);
+        mnist_free(&data);
+        return 1;
+    }
+
+    mnist_shuffle(&data, data.count);
+
+    int train_size = (int)(data.count * TRAIN_SPLIT);
+    int test_size = data.count - train_size;
+
+    float image[MNIST_PIXELS];
+    float accuracy = 0.0f;
+
+    printf("CNN 1x28x28 -> conv3x3/%d -> pool2 -> conv3x3/%d -> pool2 -> %d -> %d\n",
+           CNN_CONV1_FILTERS, CNN_CONV2_FILTERS, CNN_FC1_SIZE, CNN_CLASSES);
+    printf("Training: %d train / %d test samples, batch %d, lr %.4f, momentum %.2f, "
+           "epochs %d, seed %u\n",
+           train_size, test_size, options.batch_size, options.learning_rate,
+           options.momentum, options.epochs, options.seed);
+
+    for (int epoch = 0; epoch < options.epochs; epoch++) {
+        clock_t start = clock();
+        double total_loss = 0.0;
+
+        mnist_shuffle(&data, train_size);
+
+        for (int batch_start = 0; batch_start < train_size; batch_start += options.batch_size) {
+            int batch_end = batch_start + options.batch_size;
+            if (batch_end > train_size)
+                batch_end = train_size;
+
+            int batch_count = batch_end - batch_start;
+            cnn_zero_grad(&net);
+
+            for (int i = batch_start; i < batch_end; i++) {
+                normalize_image(data.images + (size_t)i * MNIST_PIXELS, image);
+                cnn_forward(&net, image);
+                total_loss += -log(net.probs[data.labels[i]] + 1e-10);
+                cnn_backward(&net, data.labels[i]);
+            }
+
+            cnn_step(&net, options.learning_rate / (float)batch_count, options.momentum);
+        }
+
+        accuracy = evaluate(&net, &data, train_size, test_size, image);
+
+        double seconds = (double)(clock() - start) / CLOCKS_PER_SEC;
+        printf("Epoch %d, Accuracy: %.2f%%, Avg Loss: %.4f, Time: %.2f seconds\n",
+               epoch + 1, accuracy, (float)(total_loss / train_size), seconds);
+    }
+
+    if (options.epochs == 0)
+        accuracy = evaluate(&net, &data, train_size, test_size, image);
+
+    printf("Final accuracy: %.2f%%\n", accuracy);
+
+    int status = 0;
+    if (options.save_path && checkpoint_save(&net, options.save_path) != 0)
+        status = 1;
+
+    cnn_free(&net);
+    mnist_free(&data);
+
+    return status;
 }

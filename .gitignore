@@ -53,3 +53,13 @@ dkms.conf
 
 # Binary
 /main
+/cnn
+
+# Saved model weights
+*.cnn
+
+# Build output
+/build/
+
+# macOS
+.DS_Store
