@@ -31,6 +31,8 @@ static void conv_init(ConvLayer *layer, int in_c, int in_h, int in_w,
     layer->biases = calloc((size_t)out_c, sizeof(float));
     layer->weight_grad = calloc(count, sizeof(float));
     layer->bias_grad = calloc((size_t)out_c, sizeof(float));
+    layer->weight_momentum = calloc(count, sizeof(float));
+    layer->bias_momentum = calloc((size_t)out_c, sizeof(float));
 
     float fan_in = (float)(in_c * k * k);
     for (size_t i = 0; i < count; i++)
@@ -43,10 +45,14 @@ static void conv_free(ConvLayer *layer)
     free(layer->biases);
     free(layer->weight_grad);
     free(layer->bias_grad);
+    free(layer->weight_momentum);
+    free(layer->bias_momentum);
     layer->weights = NULL;
     layer->biases = NULL;
     layer->weight_grad = NULL;
     layer->bias_grad = NULL;
+    layer->weight_momentum = NULL;
+    layer->bias_momentum = NULL;
 }
 
 static void pool_init(PoolLayer *layer, int channels, int in_h, int in_w, int size, int stride)
@@ -229,4 +235,31 @@ void cnn_backward(CNN *net, int label)
                     net->conv1.weights, CNN_CONV1_FILTERS, CNN_KERNEL, CNN_PADDING, 1,
                     net->d_conv1_out, CNN_CONV1_H, CNN_CONV1_W,
                     net->conv1.weight_grad, net->conv1.bias_grad, NULL);
+}
+
+static void conv_step(ConvLayer *layer, float learning_rate, float momentum)
+{
+    size_t count = (size_t)layer->out_c * layer->in_c * layer->k * layer->k;
+
+    for (size_t i = 0; i < count; i++) {
+        float update = momentum * layer->weight_momentum[i] + learning_rate * layer->weight_grad[i];
+        layer->weight_momentum[i] = update;
+        layer->weights[i] -= update;
+        layer->weight_grad[i] = 0.0f;
+    }
+
+    for (int i = 0; i < layer->out_c; i++) {
+        float update = momentum * layer->bias_momentum[i] + learning_rate * layer->bias_grad[i];
+        layer->bias_momentum[i] = update;
+        layer->biases[i] -= update;
+        layer->bias_grad[i] = 0.0f;
+    }
+}
+
+void cnn_step(CNN *net, float learning_rate, float momentum)
+{
+    conv_step(&net->conv1, learning_rate, momentum);
+    conv_step(&net->conv2, learning_rate, momentum);
+    dense_step(&net->fc1, learning_rate, momentum);
+    dense_step(&net->fc2, learning_rate, momentum);
 }

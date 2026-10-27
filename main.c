@@ -1,112 +1,116 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <math.h>
 #include <time.h>
 
-#include "layer.h"
+#include "cnn.h"
 #include "mnist.h"
 
-#define INPUT_SIZE MNIST_PIXELS
-#define HIDDEN_SIZE 256
-#define OUTPUT_SIZE 10
-#define LEARNING_RATE 0.0005f
+#ifndef EPOCHS
+#define EPOCHS 10
+#endif
+#ifndef BATCH_SIZE
+#define BATCH_SIZE 32
+#endif
+#ifndef LEARNING_RATE
+#define LEARNING_RATE 0.01f
+#endif
+#ifndef MOMENTUM
 #define MOMENTUM 0.9f
-#define EPOCHS 20
+#endif
+#ifndef TRAIN_SPLIT
 #define TRAIN_SPLIT 0.8
+#endif
+#ifndef SEED
+#define SEED 0
+#endif
 
 #define TRAIN_IMG_PATH "data/train-images.idx3-ubyte"
 #define TRAIN_LBL_PATH "data/train-labels.idx1-ubyte"
 
-typedef struct {
-    DenseLayer hidden, output;
-} Network;
-
-float *train(Network *net, const float *input, int label, float learning_rate) {
-    static float final_output[OUTPUT_SIZE];
-    float hidden_output[HIDDEN_SIZE];
-    float output_grad[OUTPUT_SIZE] = {0};
-    float hidden_grad[HIDDEN_SIZE] = {0};
-
-    dense_forward(&net->hidden, input, hidden_output, 1);
-    dense_forward(&net->output, hidden_output, final_output, 0);
-    softmax_inplace(final_output, OUTPUT_SIZE);
-
-    for (int i = 0; i < OUTPUT_SIZE; i++)
-        output_grad[i] = final_output[i] - (i == label);
-
-    dense_backward(&net->output, hidden_output, output_grad, hidden_grad, learning_rate, MOMENTUM);
-
-    for (int i = 0; i < HIDDEN_SIZE; i++)
-        hidden_grad[i] *= hidden_output[i] > 0 ? 1.0f : 0.0f; /* ReLU derivative */
-
-    dense_backward(&net->hidden, input, hidden_grad, NULL, learning_rate, MOMENTUM);
-
-    return final_output;
+static void normalize_image(const unsigned char *pixels, float *output)
+{
+    for (int i = 0; i < MNIST_PIXELS; i++)
+        output[i] = (float)pixels[i] / 255.0f;
 }
 
-int predict(const Network *net, const float *input) {
-    float hidden_output[HIDDEN_SIZE], final_output[OUTPUT_SIZE];
+static float evaluate(CNN *net, const MNIST *data, int start, int count, float *image)
+{
+    int correct = 0;
 
-    dense_forward(&net->hidden, input, hidden_output, 1);
-    dense_forward(&net->output, hidden_output, final_output, 0);
-    softmax_inplace(final_output, OUTPUT_SIZE);
-
-    int max_index = 0;
-    for (int i = 1; i < OUTPUT_SIZE; i++) {
-        if (final_output[i] > final_output[max_index])
-            max_index = i;
+    for (int i = 0; i < count; i++) {
+        int index = start + i;
+        normalize_image(data->images + (size_t)index * MNIST_PIXELS, image);
+        if (cnn_predict(net, image) == data->labels[index])
+            correct++;
     }
 
-    return max_index;
+    return count > 0 ? (float)correct / (float)count * 100.0f : 0.0f;
 }
 
-int main(void) {
-    Network net;
+int main(void)
+{
     MNIST data;
-    float learning_rate = LEARNING_RATE, img[INPUT_SIZE];
+    CNN net;
+    float image[MNIST_PIXELS];
+    double total_loss;
+    float accuracy = 0.0f;
     clock_t start, end;
-    double cpu_time_used;
+    double seconds;
+    unsigned int seed = SEED != 0 ? (unsigned int)SEED : (unsigned int)time(NULL);
 
-    srand(time(NULL));
-
-    dense_init(&net.hidden, INPUT_SIZE, HIDDEN_SIZE);
-    dense_init(&net.output, HIDDEN_SIZE, OUTPUT_SIZE);
+    srand(seed);
 
     if (mnist_load(TRAIN_IMG_PATH, TRAIN_LBL_PATH, &data) != 0)
         return 1;
 
+    cnn_init(&net);
     mnist_shuffle(&data, data.count);
 
     int train_size = (int)(data.count * TRAIN_SPLIT);
     int test_size = data.count - train_size;
 
+    printf("CNN 1x28x28 -> conv3x3/%d -> pool2 -> conv3x3/%d -> pool2 -> %d -> %d\n",
+           CNN_CONV1_FILTERS, CNN_CONV2_FILTERS, CNN_FC1_SIZE, CNN_CLASSES);
+    printf("Training: %d train / %d test samples, batch %d, lr %.4f, momentum %.2f, "
+           "epochs %d, seed %u\n",
+           train_size, test_size, BATCH_SIZE, LEARNING_RATE, MOMENTUM, EPOCHS, seed);
+
     for (int epoch = 0; epoch < EPOCHS; epoch++) {
         start = clock();
         mnist_shuffle(&data, train_size);
-        float total_loss = 0;
-        for (int i = 0; i < train_size; i++) {
-            for (int k = 0; k < INPUT_SIZE; k++)
-                img[k] = data.images[i * INPUT_SIZE + k] / 255.0f;
+        total_loss = 0.0;
 
-            float *final_output = train(&net, img, data.labels[i], learning_rate);
-            total_loss += -logf(final_output[data.labels[i]] + 1e-10f);
+        for (int batch_start = 0; batch_start < train_size; batch_start += BATCH_SIZE) {
+            int batch_end = batch_start + BATCH_SIZE;
+            if (batch_end > train_size)
+                batch_end = train_size;
+
+            int batch_count = batch_end - batch_start;
+            cnn_zero_grad(&net);
+
+            for (int i = batch_start; i < batch_end; i++) {
+                normalize_image(data.images + (size_t)i * MNIST_PIXELS, image);
+                cnn_forward(&net, image);
+                total_loss += -log(net.probs[data.labels[i]] + 1e-10);
+                cnn_backward(&net, data.labels[i]);
+            }
+
+            cnn_step(&net, LEARNING_RATE / (float)batch_count, MOMENTUM);
         }
-        int correct = 0;
-        for (int i = train_size; i < data.count; i++) {
-            for (int k = 0; k < INPUT_SIZE; k++)
-                img[k] = data.images[i * INPUT_SIZE + k] / 255.0f;
-            if (predict(&net, img) == data.labels[i])
-                correct++;
-        }
+
+        accuracy = evaluate(&net, &data, train_size, test_size, image);
+
         end = clock();
-        cpu_time_used = ((double)(end - start)) / CLOCKS_PER_SEC;
+        seconds = (double)(end - start) / CLOCKS_PER_SEC;
 
         printf("Epoch %d, Accuracy: %.2f%%, Avg Loss: %.4f, Time: %.2f seconds\n",
-               epoch + 1, (float)correct / test_size * 100, total_loss / train_size, cpu_time_used);
+               epoch + 1, accuracy, (float)(total_loss / train_size), seconds);
     }
 
-    dense_free(&net.hidden);
-    dense_free(&net.output);
+    printf("Final accuracy: %.2f%%\n", accuracy);
+
+    cnn_free(&net);
     mnist_free(&data);
 
     return 0;

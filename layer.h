@@ -17,15 +17,9 @@ void dense_free(DenseLayer *layer);
 
 void dense_forward(const DenseLayer *layer, const float *input, float *output, int relu);
 
-/* Backpropagates one sample and applies the momentum update in the same pass.
- * output_grad must already include the activation derivative. input_grad may
- * be NULL when the input gradient is not needed. */
-void dense_backward(DenseLayer *layer, const float *input, const float *output_grad,
-                    float *input_grad, float learning_rate, float momentum);
-
-/* Same as dense_backward but only accumulates into weight_grad/bias_grad, so a
- * caller can sum gradients over a mini-batch. Use dense_zero_grad() before the
- * first sample and dense_step() once the batch is complete. */
+/* Accumulates gradients for one sample into weight_grad/bias_grad, so a caller
+ * can sum them over a mini-batch. Use dense_zero_grad() before the first
+ * sample and dense_step() once the batch is complete. */
 void dense_backward_accumulate(DenseLayer *layer, const float *input,
                                const float *output_grad, float *input_grad);
 

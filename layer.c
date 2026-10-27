@@ -59,34 +59,6 @@ void dense_forward(const DenseLayer *layer, const float *input, float *output, i
     }
 }
 
-void dense_backward(DenseLayer *layer, const float *input, const float *output_grad,
-                    float *input_grad, float learning_rate, float momentum)
-{
-    for (int j = 0; j < layer->input_size; j++) {
-        float in_j = input[j];
-        if (in_j == 0.0f && !input_grad)
-            continue;
-
-        float *weight_row = &layer->weights[(size_t)j * layer->output_size];
-        float *momentum_row = &layer->weight_momentum[(size_t)j * layer->output_size];
-        float grad_j = 0.0f;
-
-        for (int i = 0; i < layer->output_size; i++) {
-            grad_j += output_grad[i] * weight_row[i];
-            momentum_row[i] = momentum * momentum_row[i] + learning_rate * output_grad[i] * in_j;
-            weight_row[i] -= momentum_row[i];
-        }
-
-        if (input_grad)
-            input_grad[j] = grad_j;
-    }
-
-    for (int i = 0; i < layer->output_size; i++) {
-        layer->bias_momentum[i] = momentum * layer->bias_momentum[i] + learning_rate * output_grad[i];
-        layer->biases[i] -= layer->bias_momentum[i];
-    }
-}
-
 void dense_backward_accumulate(DenseLayer *layer, const float *input,
                                const float *output_grad, float *input_grad)
 {
@@ -121,6 +93,25 @@ void dense_zero_grad(DenseLayer *layer)
 
     for (int i = 0; i < layer->output_size; i++)
         layer->bias_grad[i] = 0.0f;
+}
+
+void dense_step(DenseLayer *layer, float learning_rate, float momentum)
+{
+    size_t n = (size_t)layer->input_size * (size_t)layer->output_size;
+
+    for (size_t i = 0; i < n; i++) {
+        float update = momentum * layer->weight_momentum[i] + learning_rate * layer->weight_grad[i];
+        layer->weight_momentum[i] = update;
+        layer->weights[i] -= update;
+        layer->weight_grad[i] = 0.0f;
+    }
+
+    for (int i = 0; i < layer->output_size; i++) {
+        float update = momentum * layer->bias_momentum[i] + learning_rate * layer->bias_grad[i];
+        layer->bias_momentum[i] = update;
+        layer->biases[i] -= update;
+        layer->bias_grad[i] = 0.0f;
+    }
 }
 
 void softmax_inplace(float *values, int n)

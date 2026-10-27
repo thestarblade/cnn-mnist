@@ -14,7 +14,7 @@ CSTD     ?= c11
 WARNINGS := -Wall -Wextra
 LDLIBS   := -lm
 
-TARGET   := main
+TARGET   := cnn
 LIB_SRCS := mnist.c layer.c conv.c cnn.c
 APP_SRCS := main.c $(LIB_SRCS)
 
@@ -45,6 +45,12 @@ release: $(RELEASE_DIR)/$(TARGET)
 debug: CFLAGS += $(COMMON_CFLAGS) -O0 -g3 -fsanitize=address,undefined
 debug: LDFLAGS += -fsanitize=address,undefined
 debug: $(DEBUG_DIR)/$(TARGET)
+
+# Convenience for quick experiments, e.g. `make run EPOCHS=2`. Kept separate
+# from CFLAGS so it composes with the per-target optimisation flags.
+ifneq ($(EPOCHS),)
+release debug: CFLAGS += -DEPOCHS=$(EPOCHS)
+endif
 
 test: CFLAGS += $(COMMON_CFLAGS) -O1 -g3 -fsanitize=address,undefined
 test: LDFLAGS += -fsanitize=address,undefined

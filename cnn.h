@@ -35,6 +35,8 @@ typedef struct {
     float *biases;     /* out_c */
     float *weight_grad; /* same shape as weights, accumulated */
     float *bias_grad;   /* out_c, accumulated */
+    float *weight_momentum; /* same shape as weights */
+    float *bias_momentum;   /* out_c */
     int in_c, in_h, in_w;
     int out_c, out_h, out_w;
     int k, pad, stride;
@@ -86,5 +88,8 @@ int cnn_predict(CNN *net, const float *input);
 void cnn_backward(CNN *net, int label);
 
 void cnn_zero_grad(CNN *net);
+
+/* Applies the accumulated gradients with momentum SGD and then clears them. */
+void cnn_step(CNN *net, float learning_rate, float momentum);
 
 #endif
