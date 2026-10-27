@@ -53,3 +53,9 @@ dkms.conf
 
 # Binary
 /main
+
+# Build output
+/build/
+
+# macOS
+.DS_Store
