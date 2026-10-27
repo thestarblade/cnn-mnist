@@ -3,13 +3,14 @@
 #include <math.h>
 #include <time.h>
 
-#define INPUT_SIZE 784
+#include "mnist.h"
+
+#define INPUT_SIZE MNIST_PIXELS
 #define HIDDEN_SIZE 256
 #define OUTPUT_SIZE 10
 #define LEARNING_RATE 0.0005f
 #define MOMENTUM 0.9f
 #define EPOCHS 20
-#define IMAGE_SIZE 28
 #define TRAIN_SPLIT 0.8
 
 #define TRAIN_IMG_PATH "data/train-images.idx3-ubyte"
@@ -24,10 +25,6 @@ typedef struct {
     Layer hidden, output;
 } Network;
 
-typedef struct {
-    unsigned char *images, *labels;
-    int nImages;
-} InputData;
 
 void softmax(float *input, int size) {
     float max = input[0], sum = 0;
@@ -135,58 +132,9 @@ int predict(Network *net, float *input) {
     return max_index;
 }
 
-void read_mnist_images(const char *filename, unsigned char **images, int *nImages) {
-    FILE *file = fopen(filename, "rb");
-    if (!file) exit(1);
-
-    int temp, rows, cols;
-    fread(&temp, sizeof(int), 1, file);
-    fread(nImages, sizeof(int), 1, file);
-    *nImages = __builtin_bswap32(*nImages);
-
-    fread(&rows, sizeof(int), 1, file);
-    fread(&cols, sizeof(int), 1, file);
-
-    rows = __builtin_bswap32(rows);
-    cols = __builtin_bswap32(cols);
-
-    *images = malloc((*nImages) * IMAGE_SIZE * IMAGE_SIZE);
-    fread(*images, sizeof(unsigned char), (*nImages) * IMAGE_SIZE * IMAGE_SIZE, file);
-    fclose(file);
-}
-
-void read_mnist_labels(const char *filename, unsigned char **labels, int *nLabels) {
-    FILE *file = fopen(filename, "rb");
-    if (!file) exit(1);
-
-    int temp;
-    fread(&temp, sizeof(int), 1, file);
-    fread(nLabels, sizeof(int), 1, file);
-    *nLabels = __builtin_bswap32(*nLabels);
-
-    *labels = malloc(*nLabels);
-    fread(*labels, sizeof(unsigned char), *nLabels, file);
-    fclose(file);
-}
-
-void shuffle_data(unsigned char *images, unsigned char *labels, int n) {
-    for (int i = n - 1; i > 0; i--) {
-        int j = rand() % (i + 1);
-        for (int k = 0; k < INPUT_SIZE; k++) {
-            unsigned char temp = images[i * INPUT_SIZE + k];
-            images[i * INPUT_SIZE + k] = images[j * INPUT_SIZE + k];
-            images[j * INPUT_SIZE + k] = temp;
-        }
-        unsigned char temp = labels[i];
-        labels[i] = labels[j];
-        labels[j] = temp;
-    }
-}
-
-
 int main() {
     Network net;
-    InputData data = {0};
+    MNIST data;
     float learning_rate = LEARNING_RATE, img[INPUT_SIZE];
     clock_t start, end;
     double cpu_time_used;
@@ -196,17 +144,17 @@ int main() {
     init_layer(&net.hidden, INPUT_SIZE, HIDDEN_SIZE);
     init_layer(&net.output, HIDDEN_SIZE, OUTPUT_SIZE);
 
-    read_mnist_images(TRAIN_IMG_PATH, &data.images, &data.nImages);
-    read_mnist_labels(TRAIN_LBL_PATH, &data.labels, &data.nImages);
+    if (mnist_load(TRAIN_IMG_PATH, TRAIN_LBL_PATH, &data) != 0)
+        return 1;
 
-    shuffle_data(data.images, data.labels, data.nImages);
+    mnist_shuffle(&data, data.count);
 
-    int train_size = (int)(data.nImages * TRAIN_SPLIT);
-    int test_size = data.nImages - train_size;
+    int train_size = (int)(data.count * TRAIN_SPLIT);
+    int test_size = data.count - train_size;
 
     for (int epoch = 0; epoch < EPOCHS; epoch++) {
         start = clock();
-        shuffle_data(data.images, data.labels, train_size);
+        mnist_shuffle(&data, train_size);
         float total_loss = 0;
         for (int i = 0; i < train_size; i++) {
             for (int k = 0; k < INPUT_SIZE; k++)
@@ -216,7 +164,7 @@ int main() {
             total_loss += -logf(final_output[data.labels[i]] + 1e-10f);
         }
         int correct = 0;
-        for (int i = train_size; i < data.nImages; i++) {
+        for (int i = train_size; i < data.count; i++) {
             for (int k = 0; k < INPUT_SIZE; k++)
                 img[k] = data.images[i * INPUT_SIZE + k] / 255.0f;
             if (predict(&net, img) == data.labels[i])
@@ -237,8 +185,7 @@ int main() {
     free(net.output.biases);
     free(net.output.weight_momentum);
     free(net.output.bias_momentum);
-    free(data.images);
-    free(data.labels);
+    mnist_free(&data);
 
     return 0;
 }

@@ -14,7 +14,7 @@ WARNINGS := -Wall -Wextra
 LDLIBS   := -lm
 
 TARGET := main
-SRCS   := main.c
+SRCS   := main.c mnist.c
 OBJS   := $(SRCS:.c=.o)
 
 RELEASE_DIR := build/release
